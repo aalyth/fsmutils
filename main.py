@@ -122,31 +122,34 @@ class Automata(Generic[Alphabetic, State]):
         )
 
         for state, labels, traversed in queue:
-            print(f"<{state}, {labels}, {traversed}>")
+            # print(f"<{state}, {labels}, {traversed}>")
 
             state_occurances = traversed.count(state)
 
-            if state_occurances > 2:
+            if state in self.final:
+                match state_occurances:
+                    case 0:
+                        language.add("".join(labels))
+                    case 1:
+                        cycle_idx = traversed.index(state) + 1
+                        before_cycle = "".join(labels[:cycle_idx])
+                        cycle = "".join(labels[cycle_idx:])
+                        language.add(f"{before_cycle}({cycle})...")
+
+                    case 2:
+                        cycle_start = traversed.index(state)
+                        cycle_end = traversed[cycle_start + 1 :].index(state)
+                        before_cycle = "".join(labels[:cycle_start])
+                        cycle = "".join(labels[cycle_start:cycle_end])
+                        if cycle == "":
+                            continue
+                        after_cycle = "".join(labels[cycle_end:])
+                        language.add(f"{before_cycle}({cycle})...{after_cycle}")
+                pass
+
+            elif state_occurances > 2:
                 continue
 
-            if state_occurances > 0:
-                if state not in self.final:
-                    continue
-                first_cycle_idx = traversed.index(state)
-                try:
-                    second_cycle_idx = traversed[first_cycle_idx + 1 :].index(state)
-                except:
-                    second_cycle_idx = -1
-
-                label = "".join(labels[0:first_cycle_idx])
-                label += (
-                    "(" + "".join(labels[first_cycle_idx:second_cycle_idx]) + ")..."
-                )
-                label += "".join(labels[second_cycle_idx:])
-                language.add(label)
-
-            if state in self.final:
-                language.add("".join(labels))
             for transition in self.transitions[state]:
                 # print(transition)
                 queue.push(
