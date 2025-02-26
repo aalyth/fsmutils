@@ -4,6 +4,7 @@ from utils.queue import Queue
 
 from typing import TypeVar, Generic
 from collections import defaultdict
+from itertools import product as cartesian
 
 
 class Epsilon(str):
@@ -213,11 +214,11 @@ class Automata(Generic[Alphabetic, State]):
                     default_widths[char] = len(transitions_bucket[char])
 
         # in order to keep the ordering
-        ordered_alphabet = sorted(list(self.alphabet))
-        ordered_states = sorted(list(self.states))
+        ordered_alphabet = list(self.alphabet)
+        ordered_states = list(self.states)
 
-        # the widest posible char is ` -> *c `, which holds in exactly 7 chars
-        MAX_CHAR_WIDTH = 7
+        # +4 for the `-> *` possible combination and +2 for the whitespaces
+        MAX_CHAR_WIDTH = max(map(lambda x: len(str(x)), self.alphabet)) + 4 + 2
         top_row = f"{'Δ': ^{MAX_CHAR_WIDTH}}"
 
         border_row = "-" * MAX_CHAR_WIDTH
@@ -251,16 +252,12 @@ class Automata(Generic[Alphabetic, State]):
 
         return result + "\n"
 
+    # Automata union
     def __or__(self, other: "Automata") -> "Automata":
         if self.states & other.states != set():
-            raise ValueError("")
+            raise ValueError("uniting automatas mustn't have intersecting states")
         states = self.states | other.states
-        start_state = 1
-        while True:
-            if str(start_state) not in states:
-                break
-            start_state += 1
-        start_state = str(start_state)
+        start_state = self.__generate_new_state(states)
 
         # the `start_state` should be final only if a starting state is a final
         # in the source FSMs
@@ -268,9 +265,7 @@ class Automata(Generic[Alphabetic, State]):
         if self.initial & self.final != set() or other.initial & other.final != set():
             final_state = {start_state}
 
-        transitions = set.union(*self.transitions.values()) | set.union(
-            *other.transitions.values()
-        )
+        transitions = self.__unite_transitions(other)
         start_states = self.initial | other.initial
         for state in start_states:
             for t in self.transitions[state]:
@@ -286,15 +281,64 @@ class Automata(Generic[Alphabetic, State]):
             self.final | other.final | final_state,
         )
 
+    # Automata concatenation
     def __mul__(self, other: "Automata") -> "Automata":
+        if self.states & other.states != set():
+            raise ValueError("uniting automatas mustn't have intersecting states")
+
+        final_states = other.final
+        if other.initial & other.final != set():
+            final_states |= self.final
+
+        transitions = self.__unite_transitions(other)
+        for final in self.final:
+            for start in other.initial:
+                for t in other.transitions[start]:
+                    transitions.add(Transition(final, t.label, t.end))
+
+        return Automata(
+            self.alphabet | other.alphabet,
+            self.states | other.states,
+            self.initial,
+            transitions,
+            other.final,
+        )
+
+    # Automata Kleene star
+    def __invert__(self) -> "Automata":
+        start_state = self.__generate_new_state()
+
+        transitions = set.union(*self.transitions.values())
+        for start in self.initial:
+            for t in self.transitions[start]:
+                transitions.add(Transition(start_state, t.label, t.end))
+
+        return Automata(
+            self.alphabet,
+            self.states | {start_state},
+            {start_state},
+            transitions,
+            self.final | {start_state},
+        )
+
+    def __and__(self, other: "Automata") -> "Automata":
+        start_states = cartesian(self.inital, other.initial)
+        states = start_states
+        transitions = set()
+
+        states_queue = Queue(list(states))
+        for lstate, rstate in states_queue:
+
+            combined_transitions = cartesian(
+                self.transitions[lstate], other.transitions[rstate]
+            )
+
         pass
 
-    # this actually corresponds to the unary `*` operator similar to
-    # dereferencing the object
-    def __iter__(self) -> "Automata":
-        pass
-
+    # Convert automata to deterministic
     def deterministic(self) -> "Automata":
+        if self._deterministic:
+            return self
         pass
 
     def __str__(self) -> str:
@@ -302,6 +346,21 @@ class Automata(Generic[Alphabetic, State]):
 
     def __repr__(self) -> str:
         return str(self)
+
+    def __generate_new_state(self, states: set[State] = None) -> str:
+        if type(states) != "set":
+            states = self.states
+        state = 1
+        while True:
+            if state not in states:
+                break
+            state += 1
+        return state
+
+    def __unite_transitions(self, other: "Automata") -> set[Transition]:
+        return set.union(*self.transitions.values()) | set.union(
+            *other.transitions.values()
+        )
 
 
 if __name__ == "__main__":
@@ -348,5 +407,40 @@ if __name__ == "__main__":
             Transition("t", "a", "t"),
         },
     )
-
     print((ex_1_A | ex_1_B).as_table())
+
+    ex_2_A = Automata.from_table(
+        {"s"},
+        {"p", "q"},
+        {
+            Transition("s", 0, "s"),
+            Transition("s", 1, "p"),
+            Transition("p", 0, "q"),
+            Transition("q", 1, "p"),
+        },
+    )
+
+    ex_2_B = Automata.from_table(
+        {"r"},
+        {"t"},
+        {
+            Transition("r", 0, "r"),
+            Transition("r", 1, "r"),
+            Transition("r", 1, "t"),
+        },
+    )
+    print((ex_2_A * ex_2_B).as_table())
+
+    ex_3_A = Automata.from_table(
+        {"p"},
+        {"r"},
+        {
+            Transition("p", "b", "r"),
+            Transition("q", "a", "p"),
+            Transition("q", "a", "q"),
+            Transition("q", "b", "r"),
+            Transition("r", "a", "p"),
+            Transition("r", "b", "p"),
+        },
+    )
+    print((~ex_3_A).as_table())
