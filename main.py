@@ -67,11 +67,14 @@ class Automata(Generic[Alphabetic, State]):
     "I"
     initial: set[State]
     "Δ"
-    transitions: dict[State, set[Transition[Alphabetic, State]]]
+    # transitions: dict[State, set[Transition[Alphabetic, State]]]
+    transitions: dict[State, dict[Alphabetic, set[State]]]
+    _raw_delta: set[Transition[Alphabetic, State]]
     "F"
     final: set[State]
 
     _deterministic: bool
+    _total: bool
 
     def __init__(
         self,
@@ -93,11 +96,11 @@ class Automata(Generic[Alphabetic, State]):
         self.initial = I
         self.final = F
 
-        self.transitions = defaultdict(set)
+        self._raw_delta = D
+        self.transitions = defaultdict(lambda: defaultdict(set))
         for transition in D:
-            transition_bucket = self.transitions[transition.start]
-            transition_bucket.add(transition)
-            if len(transition_bucket) > 1:
+            self.transitions[transition.start][transition.label].add(transition.end)
+            if len(self.transitions[transition.start][transition.label]) > 1:
                 self._deterministic = False
 
     def from_table(
@@ -115,123 +118,34 @@ class Automata(Generic[Alphabetic, State]):
 
         return Automata(alphabet, states, initial, transitions, final)
 
-    # returns the states, reachable via the empty label
-    def get_c_epsilon(self, initial: set[State]) -> set[State]:
-        traversed: set[State] = set()
-
-        queue = Queue[State](list(initial))
-        for state in queue:
-            traversed.add(state)
-            for transition in self.transitions[state]:
-                if transition.label != epsilon:
-                    continue
-                if transition.end in traversed:
-                    continue
-                queue.push(transition.end)
-        return traversed
-
-    # NOTE: works only for languages without cycles
-    def get_language(self, initial: list[State] = None) -> Language:
-        if initial == None:
-            initial = self.initial
-        language = Language()
-        queue = Queue[tuple[State, str]](
-            list(map(lambda state: (state, epsilon), initial))
-        )
-        for state, label in queue:
-            if state in self.final:
-                language.add(label)
-            for transition in self.transitions[state]:
-                queue.push((transition.end, label + transition.label))
-        return language
-
-    # NOTE: does not work for languages with cycles
-    def get_language_with_cycles(self, initial: list[State] = None) -> Language:
-        if initial == None:
-            initial = self.initial
-        language = Language()
-        queue = Queue[tuple[State, list[Alphabetic], list[State]]](
-            list(map(lambda state: (state, [], []), initial))
-        )
-
-        for state, labels, traversed in queue:
-            # print(f"<{state}, {labels}, {traversed}>")
-
-            state_occurances = traversed.count(state)
-
-            if state in self.final:
-                match state_occurances:
-                    case 0:
-                        language.add("".join(labels))
-                    case 1:
-                        cycle_idx = traversed.index(state) + 1
-                        before_cycle = "".join(labels[:cycle_idx])
-                        cycle = "".join(labels[cycle_idx:])
-                        language.add(f"{before_cycle}({cycle})...")
-
-                    case 2:
-                        cycle_start = traversed.index(state)
-                        cycle_end = traversed[cycle_start + 1 :].index(state)
-                        before_cycle = "".join(labels[:cycle_start])
-                        cycle = "".join(labels[cycle_start:cycle_end])
-                        if cycle == "":
-                            continue
-                        after_cycle = "".join(labels[cycle_end:])
-                        language.add(f"{before_cycle}({cycle})...{after_cycle}")
-
-            elif state_occurances > 2:
-                continue
-
-            for transition in self.transitions[state]:
-                # print(transition)
-                queue.push(
-                    (
-                        transition.end,
-                        labels + [transition.label],
-                        traversed + [state],
-                    )
-                )
-        if "" in language:
-            language.remove("")
-            language.add(epsilon)
-        return language
-
     def as_table(self) -> str:
-        lookup: dict[State, dict[Alphabetic, list[State]]] = defaultdict(
-            lambda: defaultdict(list)
-        )
-
-        for transitions_bucket in self.transitions.values():
-            for t in transitions_bucket:
-                lookup[t.start][t.label].append(t.end)
+        def _str(val) -> str:
+            if type(val) is frozenset:
+                return str(set(val))
+            return str(val)
 
         # the maximum number of characters, that has been encountered for the
         # given column, determening the width of the whole column
         default_widths: dict[Alphabetic, int] = {char: 1 for char in self.alphabet}
-        for transitions_bucket in lookup.values():
+        for state in self.states:
             for char in self.alphabet:
-                if len(transitions_bucket[char]) > default_widths[char]:
-                    default_widths[char] = len(transitions_bucket[char])
+                current_width = len(_str(self.transitions[state][char]))
+                if current_width > default_widths[char]:
+                    default_widths[char] = current_width
 
         # in order to keep the ordering
         ordered_alphabet = list(self.alphabet)
         ordered_states = list(self.states)
 
         # +4 for the `-> *` possible combination and +2 for the whitespaces
-        MAX_CHAR_WIDTH = max(map(lambda x: len(str(x)), self.alphabet)) + 4 + 2
+        MAX_CHAR_WIDTH = max(map(lambda x: len(_str(x)), self.states)) + 4 + 2
         top_row = f"{'Δ': ^{MAX_CHAR_WIDTH}}"
 
         border_row = "-" * MAX_CHAR_WIDTH
 
-        # (width-1) is for the "," separator and the +2 is for surrounding spaces
-        width_formula = lambda width: width + (width - 1) + 2
-        default_widths = {
-            state: width_formula(width) for state, width in default_widths.items()
-        }
-
         for char in ordered_alphabet:
             char_width = default_widths[char]
-            top_row += f"|{str(char): ^{char_width}}"
+            top_row += f"|{_str(char): ^{char_width}}"
             border_row += f"+{'-' * char_width}"
 
         result = top_row
@@ -239,14 +153,14 @@ class Automata(Generic[Alphabetic, State]):
             final = "*" if state in self.final else ""
             initial = "-> " if state in self.initial else ""
 
-            tmp = f"{initial}{final}{state} "
+            tmp = f"{initial}{final}{_str(state)} "
             row = f"{tmp: >{MAX_CHAR_WIDTH}}"
 
             for char in ordered_alphabet:
                 char_entry = "-"
-                neighbouring_states = lookup[state][char]
+                neighbouring_states = self.transitions[state][char]
                 if len(neighbouring_states) > 0:
-                    char_entry = ",".join(map(str, neighbouring_states))
+                    char_entry = ",".join(map(_str, neighbouring_states))
                 row += f"|{char_entry: ^{default_widths[char]}}"
             result += f"\n{border_row}\n{row}"
 
@@ -265,13 +179,14 @@ class Automata(Generic[Alphabetic, State]):
         if self.initial & self.final != set() or other.initial & other.final != set():
             final_state = {start_state}
 
-        transitions = self.__unite_transitions(other)
+        transitions = self._raw_delta | other._raw_delta
         start_states = self.initial | other.initial
         for state in start_states:
-            for t in self.transitions[state]:
-                transitions.add(Transition(start_state, t.label, t.end))
-            for t in other.transitions[state]:
-                transitions.add(Transition(start_state, t.label, t.end))
+            neighbours = list(self.transitions[state].items())
+            neighbours.extend(other.transitions[state].items())
+            delta = [(label, end) for label, bucket in neighbours for end in bucket]
+            for label, end in delta:
+                transitions.add(Transition(start_state, label, end))
 
         return Automata(
             self.alphabet | other.alphabet,
@@ -290,11 +205,13 @@ class Automata(Generic[Alphabetic, State]):
         if other.initial & other.final != set():
             final_states |= self.final
 
-        transitions = self.__unite_transitions(other)
+        # transitions = self.__unite_transitions(other)
+        transitions = self._raw_delta | other._raw_delta
         for final in self.final:
             for start in other.initial:
-                for t in other.transitions[start]:
-                    transitions.add(Transition(final, t.label, t.end))
+                for label, bucket in other.transitions[start].items():
+                    for end_state in bucket:
+                        transitions.add(Transition(final, label, end_state))
 
         return Automata(
             self.alphabet | other.alphabet,
@@ -304,14 +221,15 @@ class Automata(Generic[Alphabetic, State]):
             other.final,
         )
 
-    # Automata Kleene star
-    def __invert__(self) -> "Automata":
+    def kleene_star(self) -> "Automata":
         start_state = self.__generate_new_state()
 
-        transitions = set.union(*self.transitions.values())
+        # transitions = set.union(*self.transitions.values())
+        transitions = self._raw_delta
         for start in self.initial:
-            for t in self.transitions[start]:
-                transitions.add(Transition(start_state, t.label, t.end))
+            for label, bucket in self.transitions[start].items():
+                for end_state in bucket:
+                    transitions.add(Transition(start_state, label, end_state))
 
         return Automata(
             self.alphabet,
@@ -322,24 +240,99 @@ class Automata(Generic[Alphabetic, State]):
         )
 
     def __and__(self, other: "Automata") -> "Automata":
-        start_states = cartesian(self.inital, other.initial)
-        states = start_states
+        start_states = set(cartesian(self.initial, other.initial))
         transitions = set()
+        traversed: set[(State, State)] = set()
 
-        states_queue = Queue(list(states))
+        states_queue = Queue(list(start_states))
         for lstate, rstate in states_queue:
+            if (lstate, rstate) in traversed:
+                continue
+            traversed.add((lstate, rstate))
 
-            combined_transitions = cartesian(
-                self.transitions[lstate], other.transitions[rstate]
-            )
+            for label in self.alphabet:
+                combined_end_states = set(
+                    cartesian(
+                        self.transitions[lstate][label],
+                        other.transitions[rstate][label],
+                    )
+                )
 
-        pass
+                for end_state in combined_end_states:
+                    transitions.add(Transition((lstate, rstate), label, end_state))
+
+                    if end_state not in traversed:
+                        states_queue.push(end_state)
+
+        final_states = {
+            (lstate, rstate)
+            for lstate, rstate in traversed
+            if lstate in self.final and rstate in other.final
+        }
+
+        return Automata(
+            self.alphabet, traversed, start_states, transitions, final_states
+        )
 
     # Convert automata to deterministic
     def deterministic(self) -> "Automata":
         if self._deterministic:
             return self
-        pass
+
+        epsilon_lookup = {state: self.get_c_epsilon({state}) for state in self.states}
+
+        transitions = set()
+        traversed: set[set[State]] = set()
+        initial_state = set.union(*[epsilon_lookup[state] for state in self.initial])
+        states_queue = Queue([initial_state])
+        alphabet = self.alphabet - {epsilon}
+        for state_set in states_queue:
+            # the state must be frozen, so it can be hashed and indexed
+            frozen_state = frozenset(state_set)
+            if frozen_state in traversed:
+                continue
+            traversed.add(frozen_state)
+
+            for label in alphabet:
+                epsilon_neigh = [
+                    epsilon_lookup[s]
+                    for state in state_set
+                    for s in self.transitions[state][label]
+                ]
+                if epsilon_neigh == []:
+                    continue
+                neighbour = set.union(*epsilon_neigh)
+                transitions.add(
+                    Transition(frozenset(state_set), label, frozenset(neighbour))
+                )
+
+                if neighbour not in traversed:
+                    states_queue.push(neighbour)
+
+        final_states = {
+            state for state in traversed if self.final.intersection(state_set) != set()
+        }
+        return Automata(
+            alphabet,
+            traversed,
+            {frozenset(initial_state)},
+            transitions,
+            final_states,
+        )
+
+    # returns the states, reachable via the empty label
+    def get_c_epsilon(self, initial: set[State]) -> set[State]:
+        traversed: set[State] = set()
+
+        queue = Queue(list(initial))
+        for state in queue:
+            traversed.add(state)
+            for neighbour in self.transitions[state][epsilon]:
+                if neighbour in traversed:
+                    continue
+                traversed.add(neighbour)
+                queue.push(neighbour)
+        return traversed
 
     def __str__(self) -> str:
         return f"<Σ: {self.alphabet}, Q: {self.states}, I: {self.initial}, Δ: {self.transitions}, F: {self.final}>"
@@ -356,11 +349,6 @@ class Automata(Generic[Alphabetic, State]):
                 break
             state += 1
         return state
-
-    def __unite_transitions(self, other: "Automata") -> set[Transition]:
-        return set.union(*self.transitions.values()) | set.union(
-            *other.transitions.values()
-        )
 
 
 if __name__ == "__main__":
@@ -396,7 +384,6 @@ if __name__ == "__main__":
             Transition("q", "b", "p"),
         },
     )
-
     ex_1_B = Automata.from_table(
         {"t"},
         {"t"},
@@ -419,7 +406,6 @@ if __name__ == "__main__":
             Transition("q", 1, "p"),
         },
     )
-
     ex_2_B = Automata.from_table(
         {"r"},
         {"t"},
@@ -443,4 +429,47 @@ if __name__ == "__main__":
             Transition("r", "b", "p"),
         },
     )
-    print((~ex_3_A).as_table())
+    print(ex_3_A.kleene_star().as_table())
+
+    ex_4_A = Automata.from_table(
+        {"s"},
+        {"s"},
+        {
+            Transition("s", "a", "s"),
+            Transition("s", "b", "s"),
+            Transition("s", "b", "p"),
+            Transition("p", "a", "p"),
+        },
+    )
+    ex_4_B = Automata.from_table(
+        {"q"},
+        {"r"},
+        {
+            Transition("q", "a", "q"),
+            Transition("q", "b", "r"),
+            Transition("r", "a", "q"),
+            Transition("r", "a", "r"),
+            Transition("r", "b", "t"),
+            Transition("t", "a", "q"),
+        },
+    )
+    print((ex_4_A & ex_4_B).as_table())
+
+    ex_5_A = Automata.from_table(
+        {0},
+        {2, 3},
+        {
+            Transition(0, "a", 1),
+            Transition(1, epsilon, 2),
+            Transition(2, "a", 3),
+            Transition(2, "a", 4),
+            Transition(2, "b", 3),
+            Transition(3, epsilon, 2),
+            Transition(3, epsilon, 0),
+            Transition(4, "a", 1),
+            Transition(4, "b", 1),
+            Transition(4, "b", 2),
+            Transition(4, epsilon, 3),
+        },
+    )
+    print(ex_5_A.deterministic().as_table())
