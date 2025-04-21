@@ -1,18 +1,12 @@
-from .utils import epsilon, Queue, Frozen
+from __future__ import annotations
 
-from typing import TypeVar, Generic, Union
-from collections import defaultdict
-from itertools import product as cartesian
+import string
+import itertools
 
+from typing import TypeVar, Generic
 
-# Although a TypeVar(), this technically is just a `char`, but there exists no
-# such type, so a custom annotation is used and not the default `str`.
-Alphabetic = TypeVar("Alphabetic")
+Alphabetic = TypeVar("Alphabetic", bound=str)
 State = TypeVar("State")
-
-Alphabet = set[Alphabetic]
-Word = list[Alphabet]
-Language = set[Word]
 
 
 class Transition(Generic[Alphabetic, State]):
@@ -25,6 +19,16 @@ class Transition(Generic[Alphabetic, State]):
         self.label = label
         self.end = end
 
+    def __hash__(self):
+        return hash((self.start, self.label, self.end))
+
+    def __eq__(self, other):
+        if not isinstance(other, Transition):
+            return False
+        self_tuple = (self.start, self.label, self.end)
+        other_tuple = (other.start, other.label, other.end)
+        return self_tuple == other_tuple
+
     def __str__(self) -> str:
         return f"<{self.start}, {self.label}, {self.end}>"
 
@@ -33,589 +37,172 @@ class Transition(Generic[Alphabetic, State]):
 
 
 class Automata(Generic[Alphabetic, State]):
-    "Σ"
-    alphabet: Alphabet
-    "Q"
+    alphabet: set[Alphabetic]
     states: set[State]
-    "I"
-    initial: set[State]
-    "Δ"
-    # transitions: dict[State, set[Transition[Alphabetic, State]]]
-    transitions: dict[State, dict[Alphabetic, set[State]]]
-    _raw_delta: set[Transition[Alphabetic, State]]
-    "F"
-    final: set[State]
+    initial_states: set[State]
+    transitions: set[Transition]
+    delta: dict[State, dict[Alphabetic, set[State]]]
+    final_states: set[State]
 
-    _deterministic: bool
-    _total: bool
+    def __new__(
+        cls,
+        alphabet: set[Alphabetic],
+        states: set[State],
+        initial_states: set[State],
+        transitions: set[Transition],
+        final_states: set[State],
+        *args,
+        **kwargs,
+    ) -> Automata | DetAutomata:
+        if not initial_states.issubset(states):
+            raise ValueError("Initial states must be a subset of all states.")
+        if not final_states.issubset(states):
+            raise ValueError("Final states must be a subset of all states.")
 
-    def __init__(
-        self,
-        S: Alphabet,
-        Q: set[State],
-        I: set[State],
-        D: set[Transition[Alphabetic, State]],
-        F: set[State],
-    ) -> None:
-        if not I <= Q or not F <= Q:
-            print(f"F: {F}")
-            print(f"I: {I}")
-            print(f"Q: {Q}")
-            raise ValueError("F and I must be subsets of Q")
+        if initial_states == set() or final_states == set():
+            raise ValueError("Initial and final states cannot be empty.")
 
-        self._deterministic = True
-        self.alphabet = S
-        self.states = Q
-        self.initial = I
-        self.final = F
-
-        self._raw_delta = D
-        self.transitions = defaultdict(lambda: defaultdict(set))
-        for transition in D:
-            self.transitions[transition.start][transition.label].add(transition.end)
-            if len(self.transitions[transition.start][transition.label]) > 1:
-                self._deterministic = False
-
-    def from_table(
-        initial: set[State],
-        final: set[State],
-        transitions: set[Transition[Alphabetic, State]],
-    ) -> "Automata":
-        alphabet = set()
-        states = set()
-
-        for t in transitions:
-            states.add(t.start)
-            states.add(t.end)
-            alphabet.add(t.label)
-
-        return Automata(alphabet, states, initial, transitions, final)
-
-    def as_table(self) -> str:
-        def _str(val) -> str:
-            if type(val) is Frozen:
-                return str(set(val))
-            return str(val)
-
-        # the maximum number of characters, that has been encountered for the
-        # given column, determening the width of the whole column
-        default_widths: dict[Alphabetic, int] = {char: 1 for char in self.alphabet}
-        for state in self.states:
-            for char in self.alphabet:
-                current_width = len(_str(self.transitions[state][char]))
-                if current_width > default_widths[char]:
-                    default_widths[char] = current_width
-
-        # in order to keep the ordering
-        ordered_alphabet = list(self.alphabet)
-        ordered_states = list(self.states)
-
-        # +4 for the `-> *` possible combination and +2 for the whitespaces
-        MAX_CHAR_WIDTH = max(map(lambda x: len(_str(x)), self.states)) + 4 + 2
-        top_row = f"{'Δ': ^{MAX_CHAR_WIDTH}}"
-
-        border_row = "-" * MAX_CHAR_WIDTH
-
-        for char in ordered_alphabet:
-            char_width = default_widths[char]
-            top_row += f"|{_str(char): ^{char_width}}"
-            border_row += f"+{'-' * char_width}"
-
-        result = top_row
-        for state in ordered_states:
-            final = "*" if state in self.final else ""
-            initial = "-> " if state in self.initial else ""
-
-            tmp = f"{initial}{final}{_str(state)} "
-            row = f"{tmp: >{MAX_CHAR_WIDTH}}"
-
-            for char in ordered_alphabet:
-                char_entry = "-"
-                neighbouring_states = self.transitions[state][char]
-                if len(neighbouring_states) > 0:
-                    char_entry = ",".join(map(_str, neighbouring_states))
-                row += f"|{char_entry: ^{default_widths[char]}}"
-            result += f"\n{border_row}\n{row}"
-
-        return result + "\n"
-
-    # Automata union
-    def __or__(self, other: "Automata") -> "Automata":
-        if self.states & other.states != set():
-            raise ValueError("uniting automatas mustn't have intersecting states")
-        states = self.states | other.states
-        start_state = self.__generate_new_state(states)
-
-        # the `start_state` should be final only if a starting state is a final
-        # in the source FSMs
-        final_state = set()
-        if self.initial & self.final != set() or other.initial & other.final != set():
-            final_state = {start_state}
-
-        transitions = self._raw_delta | other._raw_delta
-        start_states = self.initial | other.initial
-        for state in start_states:
-            neighbours = list(self.transitions[state].items())
-            neighbours.extend(other.transitions[state].items())
-            delta = [(label, end) for label, bucket in neighbours for end in bucket]
-            for label, end in delta:
-                transitions.add(Transition(start_state, label, end))
-
-        return Automata(
-            self.alphabet | other.alphabet,
-            states | {start_state},
-            {start_state},
-            transitions,
-            self.final | other.final | final_state,
-        )
-
-    # Automata concatenation
-    def __mul__(self, other: "Automata") -> "Automata":
-        if self.states & other.states != set():
-            raise ValueError("uniting automatas mustn't have intersecting states")
-
-        final_states = other.final
-        if other.initial & other.final != set():
-            final_states |= self.final
-
-        # transitions = self.__unite_transitions(other)
-        transitions = self._raw_delta | other._raw_delta
-        for final in self.final:
-            for start in other.initial:
-                for label, bucket in other.transitions[start].items():
-                    for end_state in bucket:
-                        transitions.add(Transition(final, label, end_state))
-
-        return Automata(
-            self.alphabet | other.alphabet,
-            self.states | other.states,
-            self.initial,
-            transitions,
-            other.final,
-        )
-
-    def kleene_star(self) -> "Automata":
-        start_state = self.__generate_new_state()
-
-        # transitions = set.union(*self.transitions.values())
-        transitions = self._raw_delta
-        for start in self.initial:
-            for label, bucket in self.transitions[start].items():
-                for end_state in bucket:
-                    transitions.add(Transition(start_state, label, end_state))
-
-        return Automata(
-            self.alphabet,
-            self.states | {start_state},
-            {start_state},
-            transitions,
-            self.final | {start_state},
-        )
-
-    def __and__(self, other: "Automata") -> "Automata":
-        start_states = set(cartesian(self.initial, other.initial))
-        transitions = set()
-        traversed: set[(State, State)] = set()
-
-        states_queue = Queue(list(start_states))
-        for lstate, rstate in states_queue:
-            if (lstate, rstate) in traversed:
-                continue
-            traversed.add((lstate, rstate))
-
-            for label in self.alphabet:
-                combined_end_states = set(
-                    cartesian(
-                        self.transitions[lstate][label],
-                        other.transitions[rstate][label],
-                    )
-                )
-
-                for end_state in combined_end_states:
-                    transitions.add(Transition((lstate, rstate), label, end_state))
-
-                    if end_state not in traversed:
-                        states_queue.push(end_state)
-
-        final_states = {
-            (lstate, rstate)
-            for lstate, rstate in traversed
-            if lstate in self.final and rstate in other.final
-        }
-
-        return Automata(
-            self.alphabet, traversed, start_states, transitions, final_states
-        )
-
-    # Convert automata to deterministic
-    def deterministic(self) -> "Automata":
-        if self._deterministic:
-            return self
-
-        epsilon_lookup = {state: self.get_c_epsilon({state}) for state in self.states}
-
-        transitions = set()
-        traversed: set[set[State]] = set()
-        initial_state = set.union(*[epsilon_lookup[state] for state in self.initial])
-        states_queue = Queue([initial_state])
-        alphabet = self.alphabet - {epsilon}
-        for state_set in states_queue:
-            # the state must be frozen, so it can be hashed and indexed
-            frozen_state = Frozen(state_set)
-            if frozen_state in traversed:
-                continue
-            traversed.add(frozen_state)
-
-            for label in alphabet:
-                epsilon_neigh = [
-                    epsilon_lookup[s]
-                    for state in state_set
-                    for s in self.transitions[state][label]
-                ]
-                if epsilon_neigh == []:
-                    continue
-                neighbour = set.union(*epsilon_neigh)
-                transitions.add(Transition(Frozen(state_set), label, Frozen(neighbour)))
-
-                if neighbour not in traversed:
-                    states_queue.push(neighbour)
-
-        final_states = {
-            state for state in traversed if self.final.intersection(state_set) != set()
-        }
-        return Automata(
-            alphabet,
-            traversed,
-            {Frozen(initial_state)},
-            transitions,
-            final_states,
-        )
-
-    # returns the states, reachable via the empty label
-    def get_c_epsilon(self, initial: set[State]) -> set[State]:
-        traversed: set[State] = set()
-
-        queue = Queue(list(initial))
-        for state in queue:
-            traversed.add(state)
-            for neighbour in self.transitions[state][epsilon]:
-                if neighbour in traversed:
-                    continue
-                traversed.add(neighbour)
-                queue.push(neighbour)
-        return traversed
-
-    def __str__(self) -> str:
-        return f"<Σ: {self.alphabet}, Q: {self.states}, I: {self.initial}, Δ: {self.transitions}, F: {self.final}>"
-
-    def __repr__(self) -> str:
-        return str(self)
-
-    def __generate_new_state(self, states: set[State] = None) -> str:
-        if type(states) != "set":
-            states = self.states
-        state = 1
-        while True:
-            if state not in states:
-                break
-            state += 1
-        return state
-
-
-A = TypeVar("A")
-S = TypeVar("S")
-
-
-class Automata:
-    _alphabet: set[A]
-    _states: set[S]
-    _initial: set[S]
-    _final: set[S]
-    __transitions: dict[S, dict[A, S]]
-
-    def __new__(cls) -> Union[Automata, DetAutomata]:
         deterministic = True
-        for transition in D:
-            self.transitions[transition.start][transition.label].add(transition.end)
-            if len(self.transitions[transition.start][transition.label]) > 1:
-                deterministic = False
-        if cls is Automata and deterministic:
-            return super().__new__(DetAutomata)
-        return super().__new__(Automata)
-
-    def __init__(
-        self,
-        S: Alphabet,
-        Q: set[State],
-        I: set[State],
-        D: set[Transition[Alphabetic, State]],
-        F: set[State],
-    ) -> None:
-        if not I <= Q or not F <= Q:
-            print(f"F: {F}")
-            print(f"I: {I}")
-            print(f"Q: {Q}")
-            raise ValueError("F and I must be subsets of Q")
-
-        _deterministic = True
-        for transition in D:
-            self.transitions[transition.start][transition.label].add(transition.end)
-            if len(self.transitions[transition.start][transition.label]) > 1:
-                self._deterministic = False
-        self.alphabet = S
-        self.states = Q
-        self.initial = I
-        self.final = F
-
-        # self._raw_delta = D
-        # self.transitions = defaultdict(lambda: defaultdict(set))
-
-    def from_table(
-        initial: set[State],
-        final: set[State],
-        transitions: set[Transition[Alphabetic, State]],
-    ) -> "Automata":
-        alphabet = set()
-        states = set()
-
-        for t in transitions:
-            states.add(t.start)
-            states.add(t.end)
-            alphabet.add(t.label)
-
-        return Automata(alphabet, states, initial, transitions, final)
-
-    def as_table(self) -> str:
-        def _str(val) -> str:
-            if type(val) is Frozen:
-                return str(set(val))
-            return str(val)
-
-        # the maximum number of characters, that has been encountered for the
-        # given column, determening the width of the whole column
-        default_widths: dict[Alphabetic, int] = {char: 1 for char in self.alphabet}
-        for state in self.states:
-            for char in self.alphabet:
-                current_width = len(_str(self.transitions[state][char]))
-                if current_width > default_widths[char]:
-                    default_widths[char] = current_width
-
-        # in order to keep the ordering
-        ordered_alphabet = list(self.alphabet)
-        ordered_states = list(self.states)
-
-        # +4 for the `-> *` possible combination and +2 for the whitespaces
-        MAX_CHAR_WIDTH = max(map(lambda x: len(_str(x)), self.states)) + 4 + 2
-        top_row = f"{'Δ': ^{MAX_CHAR_WIDTH}}"
-
-        border_row = "-" * MAX_CHAR_WIDTH
-
-        for char in ordered_alphabet:
-            char_width = default_widths[char]
-            top_row += f"|{_str(char): ^{char_width}}"
-            border_row += f"+{'-' * char_width}"
-
-        result = top_row
-        for state in ordered_states:
-            final = "*" if state in self.final else ""
-            initial = "-> " if state in self.initial else ""
-
-            tmp = f"{initial}{final}{_str(state)} "
-            row = f"{tmp: >{MAX_CHAR_WIDTH}}"
-
-            for char in ordered_alphabet:
-                char_entry = "-"
-                neighbouring_states = self.transitions[state][char]
-                if len(neighbouring_states) > 0:
-                    char_entry = ",".join(map(_str, neighbouring_states))
-                row += f"|{char_entry: ^{default_widths[char]}}"
-            result += f"\n{border_row}\n{row}"
-
-        return result + "\n"
-
-    # Automata union
-    def __or__(self, other: "Automata") -> "Automata":
-        if self.states & other.states != set():
-            raise ValueError("uniting automatas mustn't have intersecting states")
-        states = self.states | other.states
-        start_state = self.__generate_new_state(states)
-
-        # the `start_state` should be final only if a starting state is a final
-        # in the source FSMs
-        final_state = set()
-        if self.initial & self.final != set() or other.initial & other.final != set():
-            final_state = {start_state}
-
-        transitions = self._raw_delta | other._raw_delta
-        start_states = self.initial | other.initial
-        for state in start_states:
-            neighbours = list(self.transitions[state].items())
-            neighbours.extend(other.transitions[state].items())
-            delta = [(label, end) for label, bucket in neighbours for end in bucket]
-            for label, end in delta:
-                transitions.add(Transition(start_state, label, end))
-
-        return Automata(
-            self.alphabet | other.alphabet,
-            states | {start_state},
-            {start_state},
-            transitions,
-            self.final | other.final | final_state,
-        )
-
-    # Automata concatenation
-    def __mul__(self, other: "Automata") -> "Automata":
-        if self.states & other.states != set():
-            raise ValueError("uniting automatas mustn't have intersecting states")
-
-        final_states = other.final
-        if other.initial & other.final != set():
-            final_states |= self.final
-
-        # transitions = self.__unite_transitions(other)
-        transitions = self._raw_delta | other._raw_delta
-        for final in self.final:
-            for start in other.initial:
-                for label, bucket in other.transitions[start].items():
-                    for end_state in bucket:
-                        transitions.add(Transition(final, label, end_state))
-
-        return Automata(
-            self.alphabet | other.alphabet,
-            self.states | other.states,
-            self.initial,
-            transitions,
-            other.final,
-        )
-
-    def kleene_star(self) -> "Automata":
-        start_state = self.__generate_new_state()
-
-        # transitions = set.union(*self.transitions.values())
-        transitions = self._raw_delta
-        for start in self.initial:
-            for label, bucket in self.transitions[start].items():
-                for end_state in bucket:
-                    transitions.add(Transition(start_state, label, end_state))
-
-        return Automata(
-            self.alphabet,
-            self.states | {start_state},
-            {start_state},
-            transitions,
-            self.final | {start_state},
-        )
-
-    def __and__(self, other: "Automata") -> "Automata":
-        start_states = set(cartesian(self.initial, other.initial))
-        transitions = set()
-        traversed: set[(State, State)] = set()
-
-        states_queue = Queue(list(start_states))
-        for lstate, rstate in states_queue:
-            if (lstate, rstate) in traversed:
-                continue
-            traversed.add((lstate, rstate))
-
-            for label in self.alphabet:
-                combined_end_states = set(
-                    cartesian(
-                        self.transitions[lstate][label],
-                        other.transitions[rstate][label],
-                    )
+        deterministic_lookup: dict[tuple[State, Alphabetic], State] = {}
+        for transition in transitions:
+            if transition.start not in states or transition.end not in states:
+                raise ValueError(
+                    f"Transition from invalid states: {transition.start} -> {transition.end}"
+                )
+            if transition.label not in alphabet:
+                raise ValueError(
+                    f"Transition with invalid label: {transition.label} not in {alphabet}"
                 )
 
-                for end_state in combined_end_states:
-                    transitions.add(Transition((lstate, rstate), label, end_state))
+            if (transition.start, transition.label) in deterministic_lookup:
+                deterministic = False
+            deterministic_lookup[(transition.start, transition.label)] = transition.end
 
-                    if end_state not in traversed:
-                        states_queue.push(end_state)
+        if len(initial_states) > 1:
+            deterministic = False
 
-        final_states = {
-            (lstate, rstate)
-            for lstate, rstate in traversed
-            if lstate in self.final and rstate in other.final
-        }
+        if deterministic:
+            return DetAutomata(
+                alphabet,
+                states,
+                transitions,
+                initial_states.pop(),
+                final_states,
+            )
 
-        return Automata(
-            self.alphabet, traversed, start_states, transitions, final_states
-        )
-
-    # Convert automata to deterministic
-    def deterministic(self) -> "Automata":
-        if self._deterministic:
-            return self
-
-        epsilon_lookup = {state: self.get_c_epsilon({state}) for state in self.states}
-
-        transitions = set()
-        traversed: set[set[State]] = set()
-        initial_state = set.union(*[epsilon_lookup[state] for state in self.initial])
-        states_queue = Queue([initial_state])
-        alphabet = self.alphabet - {epsilon}
-        for state_set in states_queue:
-            # the state must be frozen, so it can be hashed and indexed
-            frozen_state = Frozen(state_set)
-            if frozen_state in traversed:
-                continue
-            traversed.add(frozen_state)
-
-            for label in alphabet:
-                epsilon_neigh = [
-                    epsilon_lookup[s]
-                    for state in state_set
-                    for s in self.transitions[state][label]
-                ]
-                if epsilon_neigh == []:
-                    continue
-                neighbour = set.union(*epsilon_neigh)
-                transitions.add(Transition(Frozen(state_set), label, Frozen(neighbour)))
-
-                if neighbour not in traversed:
-                    states_queue.push(neighbour)
-
-        final_states = {
-            state for state in traversed if self.final.intersection(state_set) != set()
-        }
         return Automata(
             alphabet,
-            traversed,
-            {Frozen(initial_state)},
+            states,
+            initial_states,
             transitions,
             final_states,
         )
 
-    # returns the states, reachable via the empty label
-    def get_c_epsilon(self, initial: set[State]) -> set[State]:
-        traversed: set[State] = set()
+        def __init__(
+            self,
+            alphabet: set[Alphabetic],
+            states: set[State],
+            initial_states: set[State],
+            transitions: set[Transition],
+            final_states: set[State],
+        ):
+            self.alphabet = alphabet
+            self.states = states
+            self.initial_states = initial_states
+            self.transitions = transitions
+            self.final_states = final_states
 
-        queue = Queue(list(initial))
-        for state in queue:
-            traversed.add(state)
-            for neighbour in self.transitions[state][epsilon]:
-                if neighbour in traversed:
-                    continue
-                traversed.add(neighbour)
-                queue.push(neighbour)
-        return traversed
+            self.delta = {}
+            for transition in transitions:
+                if transition.start not in self.delta:
+                    self.delta[transition.start] = {}
+                if transition.label not in self.delta[transition.start]:
+                    self.delta[transition.start][transition.label] = set()
+                self.delta[transition.start][transition.label].add(transition.end)
 
-    def __str__(self) -> str:
-        return f"<Σ: {self.alphabet}, Q: {self.states}, I: {self.initial}, Δ: {self.transitions}, F: {self.final}>"
+        def __or__(self, other: Automata) -> Automata:
+            if self.states & other.states:
+                raise ValueError("Automata must have unique states for union.")
 
-    def __repr__(self) -> str:
-        return str(self)
+            start_state = _generate_new_unique_state(self, other)
+            new_start_transitions = set()
 
-    def __generate_new_state(self, states: set[State] = None) -> str:
-        if type(states) != "set":
-            states = self.states
-        state = 1
-        while True:
-            if state not in states:
-                break
-            state += 1
-        return state
+            def extract_starting_transitions(automata: Automata) -> None:
+                for state in automata.initial_states:
+                    for letter in automata.delta[state].keys():
+                        for end_state in automata.delta[state][letter]:
+                            new_start_transitions.add(
+                                Transition(start_state, letter, end_state)
+                            )
+
+            extract_starting_transitions(self)
+            extract_starting_transitions(other)
+
+            return Automata(
+                self.alphabet | other.alphabet,
+                self.states | other.states | {start_state},
+                {start_state},
+                self.transitions | other.transitions | new_start_transitions,
+                self.final_states | other.final_states,
+            )
+
+        def __mul__(self, other: Automata) -> Automata:
+            if self.states & other.states:
+                raise ValueError("Automata must have unique states for concatenation.")
+
+            transitions = set()
+            for state in self.final_states:
+                for starting_state in other.initial_states:
+                    for letter in other.delta[starting_state].keys():
+                        for end_state in other.delta[starting_state][letter]:
+                            transitions.add(Transition(state, letter, end_state))
+
+            final_states = other.final_states
+            if other.initial_states & self.final_states:
+                final_states |= self.final_states
+
+            return Automata(
+                self.alphabet | other.alphabet,
+                self.states | other.states,
+                self.initial_states,
+                self.transitions | other.transitions | transitions,
+                final_states,
+            )
+
+        def _generate_new_unique_state(self, other: "Automata" | None = None) -> State:
+            other_states: set[State] = set()
+            if other is not None:
+                other_states = other.states
+
+            lookup_states = self.states | other_states
+            for letter in string.ascii_lowercase:
+                if letter not in lookup_states:
+                    return letter
+
+            for i in itertools.count(start=1):
+                if str(i) not in lookup_states:
+                    return str(i)
+
+            assert False, "unrachable code"
 
 
-class DetAutomata(Automata):
-    def __init__() -> None:
-        pass
+class DetAutomata(Automata[Alphabetic, State]):
+    initial_state: State
+    delta: dict[State, dict[Alphabetic, State]]
+
+    def __init__(
+        self,
+        alphabet: set[Alphabetic],
+        states: set[State],
+        transitions: set[Transition],
+        initial_state: State,
+        final_states: set[State],
+    ):
+        self.states = states
+        self.alphabet = alphabet
+        self.transitions = transitions
+        self.initial_state = initial_state
+        self.final_states = final_states
+
+    def __repr__(self):
+        return f"DetAutomata(states={self.states}, alphabet={self.alphabet}, transitions={self.transitions}, initial_state={self.initial_state}, final_states={self.final_states})"
